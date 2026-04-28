@@ -1,6 +1,14 @@
 import numpy as np
+import random
 
 def detect_anomaly(model):
-    sample = np.array([[0.8, 90, 400]])
-    prob = model.predict_proba(sample)[0][1]
-    return prob > 0.7
+    # 3 features (must match training)
+    role = random.randint(0,1)
+    time = random.randint(0,23)
+    extra = random.random()
+
+    X = np.array([[role, time, extra]])
+
+    prediction = model.predict(X)
+
+    return prediction[0] == 1
