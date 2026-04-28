@@ -15,7 +15,7 @@ The goal is to measure and visualize the latency difference between AES and ABE 
 - Graph visualization using matplotlib
 
 ## 📈 Results
-![Latency Graph](assets/comparision.png)
+![Latency Graph](assets/comparison.png)
 - AES is significantly faster (low latency)
 - ABE is slower but provides fine-grained access control
 
