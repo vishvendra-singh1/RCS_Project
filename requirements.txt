@@ -2,3 +2,6 @@ streamlit
 numpy
 matplotlib
 pycryptodome
+pandas
+scikit-learn
+cryptography
