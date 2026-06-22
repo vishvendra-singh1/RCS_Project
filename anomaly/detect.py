@@ -1,14 +1,14 @@
 import numpy as np
-import random
 
-def detect_anomaly(model):
-    # 3 features (must match training)
-    role = random.randint(0,1)
-    time = random.randint(0,23)
-    extra = random.random()
+def detect_anomaly(model, entropy, rate, volume):
+    """
+    Score a single request for anomalous behavior.
 
-    X = np.array([[role, time, extra]])
-
+    Features must match training set in train_rf.py: [entropy, rate, volume]
+    These are now passed in from the actual request being processed in main.py,
+    instead of being generated independently — so a detected anomaly is tied
+    to a real request's characteristics, not a disconnected random sample.
+    """
+    X = np.array([[entropy, rate, volume]])
     prediction = model.predict(X)
-
     return prediction[0] == 1
