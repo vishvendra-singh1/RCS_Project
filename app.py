@@ -11,7 +11,7 @@ from acl.abac import abac
 from encryption.aes_encrypt import aes_encrypt
 from encryption.abe import abe_encrypt, abe_decrypt
 from encryption.sensitivity import sensitivity
-from anomaly.train_rf import train_model
+from anomaly.train_rf import train_model, evaluate_model
 from anomaly.detect import detect_anomaly
 
 # ---- Train the ML model once at app startup ----
@@ -28,7 +28,7 @@ st.divider()
 model = load_model()
 
 # ====================== TABS ======================
-tab1, tab2 = st.tabs(["🔬 Single Request Pipeline", "📊 Simulation Dashboard"])
+tab1, tab2, tab3 = st.tabs(["🔬 Single Request Pipeline", "📊 Simulation Dashboard", "🧠 ML Evaluation"])
 
 
 # ==========================================
@@ -336,3 +336,94 @@ with tab2:
         st.subheader("📄 Request Log (last 50)")
         df_log = pd.DataFrame(log_rows).tail(50)
         st.dataframe(df_log, use_container_width=True)
+
+        # ==========================================
+# TAB 3 — ML EVALUATION
+# ==========================================
+with tab3:
+    st.header("🧠 ML Evaluation — Random Forest Anomaly Detector")
+    st.markdown(
+        "Trains the Random Forest on 1000 simulated access logs and evaluates it with "
+        "accuracy, precision, recall, F1-score, 5-fold cross-validation, and a confusion matrix."
+    )
+
+    run_eval = st.button("▶ Run ML Evaluation", type="primary")
+
+    if not run_eval:
+        st.info("Click **Run ML Evaluation** to train and evaluate the Random Forest model.")
+    else:
+        with st.spinner("Training and evaluating Random Forest..."):
+            results = evaluate_model(save_path="results/confusion_matrix.png")
+
+        st.divider()
+
+        # ---- Core metrics ----
+        st.subheader("📋 Model Performance Metrics")
+        mc = st.columns(4)
+        mc[0].metric("Accuracy",  f"{results['accuracy']:.4f}",  help="Overall correct predictions / total")
+        mc[1].metric("Precision", f"{results['precision']:.4f}", help="True positives / (true + false positives)")
+        mc[2].metric("Recall",    f"{results['recall']:.4f}",    help="True positives / (true positives + false negatives)")
+        mc[3].metric("F1-Score",  f"{results['f1']:.4f}",        help="Harmonic mean of precision and recall")
+
+        # ---- Cross-validation ----
+        st.divider()
+        st.subheader("🔁 5-Fold Cross-Validation")
+        cv = results["cv_scores"]
+        cv_cols = st.columns(7)
+        for idx, score in enumerate(cv):
+            cv_cols[idx].metric(f"Fold {idx+1}", f"{score:.4f}")
+        cv_cols[5].metric("Mean", f"{cv.mean():.4f}")
+        cv_cols[6].metric("Std Dev", f"{cv.std():.4f}")
+
+        # CV bar chart
+        fig_cv, ax_cv = plt.subplots(figsize=(7, 3))
+        ax_cv.bar([f"Fold {i+1}" for i in range(len(cv))], cv, color="#4C72B0", alpha=0.8)
+        ax_cv.axhline(cv.mean(), color="#e74c3c", linestyle="--", label=f"Mean: {cv.mean():.4f}")
+        ax_cv.set_ylim(0.85, 1.01)
+        ax_cv.set_title("5-Fold Cross-Validation Accuracy")
+        ax_cv.set_ylabel("Accuracy")
+        ax_cv.legend()
+        ax_cv.grid(True, axis='y')
+        st.pyplot(fig_cv)
+
+        st.divider()
+
+        # ---- Confusion matrix + metrics bar chart side by side ----
+        st.subheader("📊 Confusion Matrix & Metrics")
+        cm_col1, cm_col2 = st.columns(2)
+
+        with cm_col1:
+            from sklearn.metrics import ConfusionMatrixDisplay
+            fig_cm, ax_cm = plt.subplots(figsize=(5, 5))
+            disp = ConfusionMatrixDisplay(
+                confusion_matrix=results["confusion_matrix"],
+                display_labels=["Normal", "Anomaly"]
+            )
+            disp.plot(ax=ax_cm, cmap="Blues", colorbar=False, values_format='d')
+            ax_cm.set_title("Confusion Matrix — Anomaly Detection")
+            st.pyplot(fig_cm)
+
+        with cm_col2:
+            fig_bar, ax_bar = plt.subplots(figsize=(5, 5))
+            metrics     = ["Accuracy", "Precision", "Recall", "F1-Score"]
+            values      = [results["accuracy"], results["precision"],
+                           results["recall"], results["f1"]]
+            colors      = ["#2ecc71", "#3498db", "#e67e22", "#9b59b6"]
+            bars        = ax_bar.bar(metrics, values, color=colors, alpha=0.85)
+            for bar, val in zip(bars, values):
+                ax_bar.text(bar.get_x() + bar.get_width() / 2, val + 0.005,
+                            f"{val:.4f}", ha='center', va='bottom', fontsize=11)
+            ax_bar.set_ylim(0, 1.1)
+            ax_bar.set_title("Model Performance Metrics")
+            ax_bar.set_ylabel("Score")
+            ax_bar.grid(True, axis='y')
+            st.pyplot(fig_bar)
+
+        st.divider()
+
+        # ---- Dataset info ----
+        st.subheader("📁 Dataset Info")
+        di = st.columns(3)
+        di[0].metric("Total Samples", "1000")
+        di[1].metric("Training Set", "800 (80%)")
+        di[2].metric("Test Set", "200 (20%)")
