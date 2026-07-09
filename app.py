@@ -8,16 +8,25 @@ import pandas as pd
 
 from acl.rbac import rbac
 from acl.abac import abac
-from encryption.aes_encrypt import aes_encrypt
+from encryption.aes_encrypt import aes_encrypt, aes_encrypt_for_storage
 from encryption.abe import abe_encrypt, abe_decrypt
 from encryption.sensitivity import sensitivity
 from anomaly.train_rf import train_model, evaluate_model
 from anomaly.detect import detect_anomaly
+from database.db import (init_db, get_all_records, get_record,
+                         get_plaintext_summary, encrypt_and_store,
+                         decrypt_record, reset_record, SENSITIVITY_MAP)
 
 # ---- Train the ML model once at app startup ----
 @st.cache_resource
 def load_model():
     return train_model()
+
+# ---- Initialize database once ----
+@st.cache_resource
+def setup_db():
+    init_db()
+    return True
 
 # ---- Page config ----
 st.set_page_config(page_title="RCS — Resilient Cloud Security", layout="wide")
@@ -26,9 +35,10 @@ st.markdown("Three-layer cloud security: **RBAC/ABAC Access Control → Sensitiv
 st.divider()
 
 model = load_model()
+setup_db()
 
 # ====================== TABS ======================
-tab1, tab2, tab3 = st.tabs(["🔬 Single Request Pipeline", "📊 Simulation Dashboard", "🧠 ML Evaluation"])
+tab1, tab2, tab3, tab4 = st.tabs(["🔬 Single Request Pipeline", "📊 Simulation Dashboard", "🧠 ML Evaluation", "🗄️ Database Explorer"])
 
 
 # ==========================================
@@ -150,6 +160,110 @@ with tab1:
             c[2].metric("Sensitivity Score", f"{s:.4f}")
             c[3].metric("Anomaly", "⚠️ Yes" if is_anomaly else "✅ No")
 
+            st.divider()
+
+            # --- ABE POLICY EXPLORER ---
+            st.header("🔑 ABE Policy Explorer — k-of-n Threshold Demo")
+            st.markdown(
+                "Demonstrate how **Shamir's Secret Sharing** enables fine-grained, "
+                "threshold-based access control. Set a policy with multiple attributes "
+                "and choose how many are required to decrypt. Try different combinations "
+                "to see the cryptographic enforcement in action."
+            )
+
+            st.subheader("1. Define Policy Attributes")
+            attr_input = st.text_input(
+                "Policy attributes (comma-separated)",
+                value="doctor_A, doctor_B, doctor_C",
+                help="These are the attributes that form the encryption policy."
+            )
+            policy_attrs = [a.strip() for a in attr_input.split(",") if a.strip()]
+
+            if len(policy_attrs) < 2:
+                st.warning("Please enter at least 2 attributes.")
+            else:
+                n = len(policy_attrs)
+
+                st.subheader("2. Set the Threshold (k of n)")
+                k = st.slider(
+                    f"How many attributes are required to decrypt? (out of {n})",
+                    min_value=1, max_value=n, value=min(2, n),
+                    help="k-of-n: any k attributes from the policy can reconstruct the key."
+                )
+                st.info(
+                    f"Policy: any **{k} of {n}** attributes required — "
+                    f"{'AND policy (all required)' if k == n else f'threshold policy ({k}-of-{n})'}"
+                )
+
+                abe_data = st.text_input(
+                    "Data to encrypt under this policy",
+                    value="Top Secret Medical Record",
+                    key="abe_explorer_data"
+                )
+
+                if st.button("🔐 Encrypt with ABE Policy", key="abe_encrypt_btn"):
+                    policy_set = set(policy_attrs)
+                    pkg = abe_encrypt(abe_data, policy_set, policy_set, threshold=k)
+                    st.session_state["abe_pkg"]    = pkg
+                    st.session_state["abe_policy"] = policy_attrs
+                    st.session_state["abe_k"]      = k
+                    st.session_state["abe_data"]   = abe_data
+                    st.success(f"✅ Data encrypted under policy: `{policy_attrs}` with threshold k={k}")
+                    with st.expander("📦 View ciphertext package"):
+                        st.json({kk: vv for kk, vv in pkg.items() if kk != "shares"})
+                        st.caption("Shares omitted (contain per-attribute masked key material)")
+
+                if "abe_pkg" in st.session_state:
+                    st.subheader("3. Try to Decrypt")
+                    st.markdown(
+                        f"Select which attributes you **hold** as the decryptor. "
+                        f"You need at least **{st.session_state['abe_k']}** matching attribute(s) to succeed."
+                    )
+
+                    held_attrs = st.multiselect(
+                        "Your attributes (select what you hold):",
+                        options=st.session_state["abe_policy"],
+                        default=st.session_state["abe_policy"][:st.session_state["abe_k"]],
+                        key="abe_held_attrs"
+                    )
+
+                    if st.button("🔓 Attempt Decryption", key="abe_decrypt_btn"):
+                        matching = [a for a in held_attrs if a in st.session_state["abe_policy"]]
+                        result   = abe_decrypt(st.session_state["abe_pkg"], set(held_attrs))
+
+                        dec_cols = st.columns(3)
+                        dec_cols[0].metric("Attributes held",       len(held_attrs))
+                        dec_cols[1].metric("Threshold required",    st.session_state["abe_k"])
+                        dec_cols[2].metric("Matching policy attrs", len(matching))
+
+                        if result is not None:
+                            st.success(f"✅ **Decryption successful!** Recovered: `{result}`")
+                            st.balloons()
+                        else:
+                            st.error(
+                                f"❌ **Decryption failed.** "
+                                f"You hold {len(matching)} matching attribute(s) but need "
+                                f"{st.session_state['abe_k']}. The AES-GCM authentication "
+                                f"tag verification failed — wrong key reconstructed."
+                            )
+
+                    st.subheader("4. Scenario Comparison")
+                    st.markdown("All possible attribute combinations and whether they can decrypt:")
+                    from itertools import combinations
+                    rows = []
+                    pol  = st.session_state["abe_policy"]
+                    kk   = st.session_state["abe_k"]
+                    for r in range(1, len(pol) + 1):
+                        for combo in combinations(pol, r):
+                            res = abe_decrypt(st.session_state["abe_pkg"], set(combo))
+                            rows.append({
+                                "Attributes held":   ", ".join(combo),
+                                "Count":             len(combo),
+                                "Meets threshold":   "✅ Yes" if len(combo) >= kk else "❌ No",
+                                "Decryption result": "✅ Success" if res is not None else "❌ Failed"
+                            })
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
 
 # ==========================================
 # TAB 2 — SIMULATION DASHBOARD
@@ -164,7 +278,6 @@ with tab2:
     if not run_sim:
         st.info("Click **Run 500-Request Simulation** to start. The simulation runs all 500 requests live with a progress bar.")
     else:
-        # ---- Live counters placeholders ----
         progress_bar  = st.progress(0, text="Starting simulation...")
         metric_cols   = st.columns(5)
         m_processed   = metric_cols[0].empty()
@@ -173,7 +286,6 @@ with tab2:
         m_abe         = metric_cols[3].empty()
         m_anomaly     = metric_cols[4].empty()
 
-        # ---- State ----
         denied_count  = 0
         aes_count     = 0
         abe_count     = 0
@@ -192,7 +304,6 @@ with tab2:
             conf_s   = random.random()
             threat_s = random.random()
 
-            # Layer 1
             if not rbac(role_s, "read") or not abac(env_s):
                 denied_count += 1
                 log_rows.append({
@@ -209,7 +320,6 @@ with tab2:
                     m_anomaly.metric("Anomalies", anomaly_count)
                 continue
 
-            # Layer 2
             s_score  = sensitivity(conf_s, 1, threat_s)
             policy_s = {f"role:{role_s}", "region:india"}
 
@@ -228,7 +338,6 @@ with tab2:
                 aes_count += 1
                 enc_used = "AES"
 
-            # Layer 3
             entropy_s = s_score
             rate_s    = (i % 100) + random.uniform(0, 5)
             volume_s  = random.uniform(50, 500)
@@ -258,7 +367,6 @@ with tab2:
 
         progress_bar.progress(1.0, text="✅ Simulation complete!")
 
-        # ---- Final summary ----
         st.divider()
         st.subheader("📋 Final Summary")
         fc = st.columns(5)
@@ -278,7 +386,6 @@ with tab2:
 
         st.divider()
 
-        # ---- Charts ----
         st.subheader("📈 Results")
         chart_col1, chart_col2 = st.columns(2)
 
@@ -332,12 +439,12 @@ with tab2:
 
         st.divider()
 
-        # ---- Request log ----
         st.subheader("📄 Request Log (last 50)")
         df_log = pd.DataFrame(log_rows).tail(50)
         st.dataframe(df_log, use_container_width=True)
 
-        # ==========================================
+
+# ==========================================
 # TAB 3 — ML EVALUATION
 # ==========================================
 with tab3:
@@ -357,7 +464,6 @@ with tab3:
 
         st.divider()
 
-        # ---- Core metrics ----
         st.subheader("📋 Model Performance Metrics")
         mc = st.columns(4)
         mc[0].metric("Accuracy",  f"{results['accuracy']:.4f}",  help="Overall correct predictions / total")
@@ -365,7 +471,6 @@ with tab3:
         mc[2].metric("Recall",    f"{results['recall']:.4f}",    help="True positives / (true positives + false negatives)")
         mc[3].metric("F1-Score",  f"{results['f1']:.4f}",        help="Harmonic mean of precision and recall")
 
-        # ---- Cross-validation ----
         st.divider()
         st.subheader("🔁 5-Fold Cross-Validation")
         cv = results["cv_scores"]
@@ -375,7 +480,6 @@ with tab3:
         cv_cols[5].metric("Mean", f"{cv.mean():.4f}")
         cv_cols[6].metric("Std Dev", f"{cv.std():.4f}")
 
-        # CV bar chart
         fig_cv, ax_cv = plt.subplots(figsize=(7, 3))
         ax_cv.bar([f"Fold {i+1}" for i in range(len(cv))], cv, color="#4C72B0", alpha=0.8)
         ax_cv.axhline(cv.mean(), color="#e74c3c", linestyle="--", label=f"Mean: {cv.mean():.4f}")
@@ -388,7 +492,6 @@ with tab3:
 
         st.divider()
 
-        # ---- Confusion matrix + metrics bar chart side by side ----
         st.subheader("📊 Confusion Matrix & Metrics")
         cm_col1, cm_col2 = st.columns(2)
 
@@ -421,9 +524,154 @@ with tab3:
 
         st.divider()
 
-        # ---- Dataset info ----
         st.subheader("📁 Dataset Info")
         di = st.columns(3)
         di[0].metric("Total Samples", "1000")
         di[1].metric("Training Set", "800 (80%)")
         di[2].metric("Test Set", "200 (20%)")
+
+
+# ==========================================
+# TAB 4 — DATABASE EXPLORER
+# ==========================================
+with tab4:
+    st.header("🗄️ Database Explorer — Real Encrypted Records")
+    st.markdown(
+        "Select a real record from the database, run it through the RCS "
+        "encryption pipeline, and store the encrypted blob back. "
+        "Then decrypt it to prove end-to-end data protection."
+    )
+
+    TABLE_LABELS = {
+        "medical_records":   "🏥 Medical Records   (sensitivity: HIGH)",
+        "financial_records": "💰 Financial Records (sensitivity: HIGH)",
+        "hr_records":        "👤 HR Records        (sensitivity: MEDIUM)",
+        "documents":         "📄 Documents         (sensitivity: LOW/MEDIUM)",
+    }
+
+    selected_label = st.selectbox("Select data category:", list(TABLE_LABELS.values()))
+    table = [k for k, v in TABLE_LABELS.items() if v == selected_label][0]
+
+    records = get_all_records(table)
+    if not records:
+        st.warning("No records found. Database may not be initialized.")
+        st.stop()
+
+    def record_label(r, t):
+        if t == "medical_records":   return f"#{r['id']} — {r['patient']} ({r['diagnosis']})"
+        if t == "financial_records": return f"#{r['id']} — {r['holder']} | {r['txn_type']} ₹{r['amount']:,.0f}"
+        if t == "hr_records":        return f"#{r['id']} — {r['employee']} | {r['role']}"
+        if t == "documents":         return f"#{r['id']} — {r['title']} ({r['category']})"
+        return f"#{r['id']}"
+
+    options     = {record_label(r, table): r["id"] for r in records}
+    chosen_lbl  = st.selectbox("Select a record:", list(options.keys()))
+    record_id   = options[chosen_lbl]
+    record      = get_record(table, record_id)
+    plaintext   = get_plaintext_summary(record, table)
+    sensitivity_class = record.get("sensitivity", "MEDIUM")
+    base_score  = SENSITIVITY_MAP[sensitivity_class]
+
+    st.divider()
+
+    st.subheader("📋 Record Details")
+    detail_cols = st.columns(3)
+    detail_cols[0].metric("Record ID",              f"#{record_id}")
+    detail_cols[1].metric("Classification",         sensitivity_class)
+    detail_cols[2].metric("Base Sensitivity Score", f"{base_score:.2f}")
+
+    enc_status = "🔒 Encrypted" if record["encrypted"] else "🔓 Plaintext"
+    if record["encrypted"]:
+        st.warning(f"Status: {enc_status} — currently stored as `{record['enc_scheme']}` ciphertext")
+    else:
+        st.success(f"Status: {enc_status} — plaintext visible")
+        st.code(plaintext, language="text")
+
+    st.divider()
+
+    st.subheader("🔐 Encrypt This Record")
+
+    if record["encrypted"]:
+        st.info("This record is already encrypted. Decrypt it first before re-encrypting.")
+    else:
+        threat_db    = st.slider("Threat level for this request", 0.0, 1.0, 0.5, key="db_threat")
+        final_score  = 0.4 * base_score + 0.3 * base_score + 0.3 * threat_db
+        scheme_chosen = "ABE" if final_score > 0.6 else "AES-256-GCM"
+
+        sc1, sc2 = st.columns(2)
+        sc1.metric("Final Sensitivity Score",   f"{final_score:.4f}")
+        sc2.metric("Encryption Scheme Selected", scheme_chosen)
+
+        if scheme_chosen == "ABE":
+            st.info("🔐 High sensitivity → **ABE (SSS+AES-GCM)** will be used. Policy: `role:admin` AND `region:india`")
+        else:
+            st.info("⚡ Lower sensitivity → **AES-256-GCM** will be used.")
+
+        if st.button("🔐 Encrypt & Store in Database", type="primary", key="db_encrypt_btn"):
+            with st.spinner("Encrypting and storing..."):
+                if scheme_chosen == "ABE":
+                    policy_db = {"role:admin", "region:india"}
+                    blob = abe_encrypt(plaintext, policy_db, policy_db)
+                    encrypt_and_store(table, record_id, "ABE", blob)
+                else:
+                    blob = aes_encrypt_for_storage(plaintext)
+                    encrypt_and_store(table, record_id, "AES-256-GCM", blob)
+            st.success(f"✅ Record #{record_id} encrypted with **{scheme_chosen}** and stored in the database.")
+            st.rerun()
+
+    st.divider()
+
+    st.subheader("🔓 Decrypt This Record")
+
+    if not record["encrypted"]:
+        st.info("This record is not encrypted yet. Encrypt it first.")
+    else:
+        st.markdown(f"Stored as: `{record['enc_scheme']}`")
+
+        if record["enc_scheme"] == "AES-256-GCM":
+            if st.button("🔓 Decrypt with AES Key", type="primary", key="db_decrypt_aes"):
+                result = decrypt_record(table, record_id)
+                if result:
+                    st.success("✅ Decryption successful!")
+                    st.code(result, language="text")
+                else:
+                    st.error("❌ Decryption failed.")
+
+        elif record["enc_scheme"] == "ABE":
+            st.markdown("ABE policy requires: `role:admin` AND `region:india`")
+            user_attrs_db = st.multiselect(
+                "Select your attributes:",
+                ["role:admin", "role:user", "region:india", "region:us"],
+                default=["role:admin", "region:india"],
+                key="db_abe_attrs"
+            )
+            if st.button("🔓 Decrypt with ABE Attributes", type="primary", key="db_decrypt_abe"):
+                result = decrypt_record(table, record_id, user_attrs=user_attrs_db)
+                if result:
+                    st.success("✅ Decryption successful!")
+                    st.code(result, language="text")
+                    st.balloons()
+                else:
+                    st.error(
+                        f"❌ Decryption failed — your attributes `{user_attrs_db}` "
+                        f"do not satisfy the policy. AES-GCM tag verification failed."
+                    )
+
+        if st.button("🔄 Reset Record (clear encryption)", key="db_reset_btn"):
+            reset_record(table, record_id)
+            st.success("Record reset to plaintext state.")
+            st.rerun()
+
+    st.divider()
+
+    st.subheader("📊 All Records in This Table")
+    df = pd.DataFrame(records)
+    display_cols = [c for c in df.columns if c not in ["enc_blob"]]
+    st.dataframe(df[display_cols], use_container_width=True)
+
+    total     = len(records)
+    encrypted = sum(1 for r in records if r["encrypted"])
+    sc = st.columns(3)
+    sc[0].metric("Total Records", total)
+    sc[1].metric("Encrypted",     encrypted)
+    sc[2].metric("Plaintext",     total - encrypted)
