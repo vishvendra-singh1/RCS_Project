@@ -1,3 +1,4 @@
+import os
 import random
 import pandas as pd
 import numpy as np
@@ -85,13 +86,13 @@ def evaluate_model(samples=1000, cv_folds=5, save_path="results/confusion_matrix
     y_pred = model.predict(X_test)
 
     # ---- Core metrics on held-out test set ----
-    acc = accuracy_score(y_test, y_pred)
+    acc  = accuracy_score(y_test, y_pred)
     prec = precision_score(y_test, y_pred, zero_division=0)
-    rec = recall_score(y_test, y_pred, zero_division=0)
-    f1 = f1_score(y_test, y_pred, zero_division=0)
+    rec  = recall_score(y_test, y_pred, zero_division=0)
+    f1   = f1_score(y_test, y_pred, zero_division=0)
 
-    # ---- K-fold cross-validation (more robust accuracy estimate) ----
-    cv_model = RandomForestClassifier(n_estimators=100, max_depth=15, random_state=42)
+    # ---- K-fold cross-validation ----
+    cv_model  = RandomForestClassifier(n_estimators=100, max_depth=15, random_state=42)
     cv_scores = cross_val_score(cv_model, X, y, cv=cv_folds, scoring="accuracy")
 
     # ---- Confusion matrix ----
@@ -123,16 +124,20 @@ def evaluate_model(samples=1000, cv_folds=5, save_path="results/confusion_matrix
     disp.plot(ax=ax, cmap="Blues", colorbar=False, values_format='d')
     ax.set_title("Confusion Matrix — Anomaly Detection")
     plt.tight_layout()
-    plt.savefig(save_path, dpi=150)
-    print(f"Confusion matrix saved to: {save_path}")
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(save_path)), exist_ok=True)
+        plt.savefig(save_path, dpi=150)
+        print(f"Confusion matrix saved to: {save_path}")
+    except Exception:
+        pass  # skip saving on read-only filesystems (e.g. Streamlit Cloud)
     plt.close(fig)
 
     return {
-        "accuracy": acc,
-        "precision": prec,
-        "recall": rec,
-        "f1": f1,
-        "cv_scores": cv_scores,
+        "accuracy":         acc,
+        "precision":        prec,
+        "recall":           rec,
+        "f1":               f1,
+        "cv_scores":        cv_scores,
         "confusion_matrix": cm,
     }
 
