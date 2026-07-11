@@ -5,3 +5,4 @@ pycryptodome
 pandas
 scikit-learn
 cryptography
+psycopg2-binary
